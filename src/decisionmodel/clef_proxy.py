@@ -48,9 +48,10 @@ MAX_CONCURRENCY = int(os.getenv("MAX_CONCURRENCY", "8"))
 ANALYTICS_LAG = float(os.getenv("ANALYTICS_LAG", "120"))
 TIMEOUT = float(os.getenv("UPSTREAM_TIMEOUT", "60"))
 API_BASE = os.getenv("CF_API_BASE", "https://api.cloudflare.com/client/v4").rstrip("/")
-STATE_FILE = os.getenv("CLEF_PROXY_STATE", os.path.expanduser("~/.clef_proxy_state.json"))
+USAGE_FILE = os.getenv("CLEF_USAGE_FILE", os.path.expanduser("~/.clef_proxy_usage.json"))
 
 UPSTREAM_URL = f"{API_BASE}/accounts/{ACCOUNT_ID}/ai/run/@cf/cloudflare/{MODEL}"
+GRAPHQL_URL = f"{API_BASE}/graphql"
 
 FALLBACK_INSTRUCTIONS = "Answer this question about the given state."
 
@@ -111,6 +112,28 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="clef-proxy", lifespan=lifespan)
 
+# --------------------------------------------------------------------------
+# 2. Helpers
+# --------------------------------------------------------------------------
+def utc_today() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%M-%d")
+
+def new_day() -> dict:
+    return {
+        "requests": 0,            # requests forwarded to Cloudflare (answered or failed)
+        "errors": 0,              
+        "blocked": 0,             # refused by the budget guard (never sent)
+        "questions": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "api_ms_total": 0,        # divide by `requests` for the average
+        "api_ms_max": 0,
+        "models_used": [],
+        "cloudflare_neurons": None,
+        "cloudflare_by_model": {},
+        "neurons_read_at": None,
+    }
+
 def error(status: int, msg: str, etype: str = "proxy_error", headers: dict | None = None):
     console.log(Text.assemble((f"ERROR {status} ", "bold red"), (msg, "red")))
     return JSONResponse(
@@ -124,6 +147,68 @@ def upstream_message(payload) -> str:
     if errs:
         return "; ".join(f"{e.get('code', '')} {e.get('message', '')}".strip() for e in errs)
     return json.dumps(payload)[:300]
+
+class SyncError(Exception):
+    pass
+# --------------------------------------------------------------------------
+# 3. Reading neurons from Cloudflare (GraphQL Analytics)
+# --------------------------------------------------------------------------
+
+async def fetch_cloudflare_usage(client: httpx.AsyncClient, day: str) -> tuple[float, dict[str, float]]:
+    """Return (account_total_neurons, neurons_by_model) for a UTC day."""
+    start = datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    end   = start + timedelta(days=1)
+    fmt   = "%Y-%m-%dT%H:%M:%SZ"
+
+    query = """
+    {
+      viewer {
+        accounts(filter: {accountTag: "%s"}) {
+          aiInferenceAdaptiveGroups(
+            limit: 1000,
+            filter: {datetime_geq: "%s", datetime_lt: "%s"}
+          ) {
+            dimensions { modelId }
+            sum { totalNeurons }
+          }
+        }
+      }
+    }
+    """ % (ACCOUNT_ID, start.strftime(fmt), end.strftime(fmt))
+
+    resp = await client.post(
+        GRAPHQL_URL,
+        json={"query": query},
+        headers={"Authorization": f"Bearer {ANALYTICS_TOKEN}"}
+    )
+
+    try:
+        payload = resp.json()
+    except json.JSONDecodeError:
+        raise SyncError(f"HTTP {resp.status_code}: replay was not JSON")
+    if not isinstance(payload, dict):
+        raise SyncError(f"HTTP {resp.status_code}: unexpected replay")
+
+    errs = payload.get("errors")
+    if resp.status_code != 200 or errs:
+        msg = ";".join(str(e.get("message", e)) if isinstance(e, dict) else str(e) for e in (errs or []))
+        raise SyncError(msg or f"HTTP {resp.status_code}")
+    accounts = ((payload.get("data") or {}).get("viewer") or {}).get("accounts") or []
+    if not accounts:
+        raise SyncError(
+            "no account returned - check CLOUDFLARE_ACCOUNT_ID and " \
+            "that the token has 'Account Analytics: Read'"
+            )
+    total, by_model = 0.0, {}
+    # Neurons Total used by all models (clef and clef-flash)
+    for g in accounts[0].get("aiInferenceAdaptiveGroups"):
+        n = float((g.get("sum") or {}).get("totalNeurons") or 0)
+        model_id = str((g.get("dimensions") or {}).get("modelId") or "unknown")
+        total += n
+        by_model[model_id] = by_model.get(model_id, 0.0) + n
+
+    return total, by_model
+
 
 # --------------------------------------------------------------------------
 # 4. Routes
@@ -208,7 +293,7 @@ def main() -> None:
         sys.exit(f"CLEF_MODEL must be one of {sorted(MODELS)}, got {MODEL!r}")
     if not ACCOUNT_ID or not API_TOKEN:
         sys.exit("Missing CLOUDFLARE_ACCOUNT_ID or CLOUDFLARE_API_TOKEN (put them in your .env file)")
-    uvicorn.run(app, host=HOST, port=PORT)
+    uvicorn.run(app, host=HOST, port=PORT, log_level="warning", log_config=None)
     
 if __name__ == "__main__":
     main()
