@@ -4,7 +4,7 @@ import logging
 import os
 import sys
 import time
-from collections import deque, Counter
+from collections import Counter
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
@@ -104,7 +104,7 @@ async def lifespan(app: FastAPI):
     )
 
     app.state.analytics_client = httpx.AsyncClient(
-        headers={"Authorization": f"Bearer {ANALYTICS_TOKEN}", "User-Agent": "clef-duckdb-proxy/1"},
+        headers={"Authorization": f"Bearer {ANALYTICS_TOKEN}", "User-Agent": "clef-duckdb-proxy/1", "Cache-Control": "no-cache"}, # blocking the caching for fresh request
         timeout=httpx.Timeout(15.0, connect=10.0),
         transport=httpx.AsyncHTTPTransport(retries=1)
     )
@@ -274,8 +274,7 @@ async def fetch_cloudflare_usage(client: httpx.AsyncClient, day: str) -> tuple[f
 
     resp = await client.post(
         GRAPHQL_URL,
-        json={"query": query},
-        headers={"Authorization": f"Bearer {ANALYTICS_TOKEN}", "Cache-Control": "no-cache"} # blocking the caching for freach request
+        json={"query": query}
     )
 
     try:
