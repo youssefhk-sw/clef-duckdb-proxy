@@ -429,9 +429,28 @@ def describe(body: dict) -> dict:
 # --------------------------------------------------------------------------
 @app.get("/health")
 async def health():
-    return JSONResponse(
-        {"status": "ok", "model": MODEL, "usage": 0}
-    )
+    day = STORE.today()
+    used = day["cloudflare_neurons"] 
+    return JSONResponse({
+        "status": "ok" if RT.last_error is None else "degraded",
+        "model": MODEL,
+        "usage": {
+            "cloudflare_neurons": used,
+            "daily_limit": DAILY_NEURON_LIMIT,
+            "remaining": None if used is None else max(0.0, DAILY_NEURON_LIMIT - used),
+            "by_model": day["cloudflare_by_model"],
+            "read_at": day["neurons_read_at"],
+            "last_read_error": RT.last_error,
+        },
+        "today": {
+            "requests": day["requests"],
+            "errors": day["errors"],
+            "blocked": day["blocked"],
+            "input_tokens": day["input_tokens"],
+            "output_tokens": day["output_tokens"],
+        },
+        "live": {"in_flight": RT.in_flight, "queued": RT.queued},
+    })
 
 @app.get("/v1/model")
 async def models():
