@@ -32,7 +32,7 @@ Both are *decision models*: you give them text and questions, they return typed 
 | Cost | Paid per token | Free daily allowance (10,000 neurons) on Workers AI |
 | Request format | Jev API | Same as Jev |
 
-Same SQL works with both, but **answers can differ**. Compare on your own data. ([Jev docs](https://docs.typesafe.ai/introduction), [Clef blog](https://blog.cloudflare.com/clef-decision-models/))
+Same SQL works with both, but **answers can differ**. Compare on your own data. ([Jev docs](https://docs.typesafe.ai/introduction))
 
 ## The `jev` extension
 
