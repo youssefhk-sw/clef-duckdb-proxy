@@ -7,5 +7,6 @@ wheels/
 *.egg-info
 .env
 notes.md
+.vscode/
 # Virtual environments
 .venv
